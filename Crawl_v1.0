@@ -1,0 +1,734 @@
+import os
+import re
+import csv
+import json
+import time
+import hashlib
+import sys
+import pandas as pd
+from datetime import datetime
+from functools import wraps
+from urllib.parse import urljoin, urlparse
+
+# --- UI Dependencies ---
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton,
+                             QLabel, QFileDialog, QLineEdit, QTextEdit, QHBoxLayout, QGroupBox)
+from PyQt5.QtCore import QObject, pyqtSignal, QThread
+
+# --- Project Dependencies ---
+import requests
+from langchain_mistralai.chat_models import ChatMistralAI
+from langchain_core.messages import HumanMessage
+import ftfy
+from dateutil.parser import parse as date_parse
+from dotenv import load_dotenv
+
+# ###################################################################################
+# --- CONFIGURATION ---
+# ###################################################################################
+
+MISTRAL_MODEL = "mistral-large-latest"
+APP_VERSION = "v63.2-Robust"  # Updated Version
+TOP_N_URLS_TO_PROCESS = 4
+MAX_SEARCH_RESULTS = 10
+MAX_SUBPAGES_PER_SITE = 5
+MAX_RETRIES = 3
+DEBUG = True
+
+# Directories will be set dynamically
+OUTPUT_DIR = "outputs"
+CRAWL_CACHE_DIR = "crawl_cache"
+KNOWLEDGE_CACHE_DIR = "knowledge_cache"
+
+# Field processing rules
+DEFAULT_BLANK_FIELDS = [
+    'imageURL', 'raceVideo', 'scenic', 'swimRoutemap', 'cyclingRoutemap',
+    'runRoutemap', 'difficultyLevel', 'country', 'user_id', 'femaleParticpation',
+    'jellyFishRelated', 'primaryKey', 'latitude', 'longitude', 'organiserRating',
+    'approvalStatus', 'nextEdition'
+]
+
+CHOICE_OPTIONS = {
+    "participationType": ["Individual", "Relay", "Group"],
+    "mode": ["Virtual", "On-Ground"],
+    "runningSurface": ["Road", "Trail", "Track", "Road + Trail"],
+    "runningCourseType": ["Single Loop", "Multiple Loop", "Out and Back", "Point to Point"],
+    "region": ["West India", "Central and East India", "North India", "South India", "Nepal", "Bhutan", "Sri Lanka"],
+    "runningElevation": ["Flat", "Rolling", "Hilly", "Skyrunning"],
+    "type": ["Triathlon", "Aquabike", "Aquathlon", "Duathlon", "Run", "Cycling", "Swimathon"],
+    "swimType": ["Lake", "Beach", "River", "Pool"],
+    "swimCoursetype": ["Single Loop", "Multiple Loops", "Out and Back", "Point to Point"],
+    "cyclingElevation": ["Flat", "Rolling", "Hilly"],
+    "cycleCoursetype": ["Single Loop", "Multiple Loops", "Out and Back", "Point to Point"],
+    "triathlonType": ["Super Sprint", "Sprint Distance", "Olympic Distance", "Half Iron(70.3)", "Iron Distance (140.6)",
+                      "Ultra Distance"],
+    "standardTag": ["Standard", "Non Standard"],
+    "approvalStatus": ["Approved", "Pending Approval"],
+    "restrictedTraffic": ["Yes", "No"],
+    "jellyFishRelated": ["Yes", "No"]
+}
+
+# Schemas
+TRIATHLON_SCHEMA = [
+    'event', 'festivalName', 'imageURL', 'raceVideo', 'type', 'date', 'city', 'organiser', 'participationType',
+    'firstEdition', 'lastEdition', 'countEditions', 'mode', 'raceAccredition', 'theme', 'numberOfparticipants',
+    'startTime', 'scenic', 'registrationCost', 'ageLimitation', 'eventWebsite', 'organiserWebsite', 'bookingLink',
+    'newsCoverage', 'lastDate', 'participationCriteria', 'refundPolicy', 'swimDistance', 'swimType',
+    'swimmingLocation', 'waterTemperature', 'swimCoursetype', 'swimCutoff', 'swimRoutemap', 'cyclingDistance',
+    'cyclingElevation', 'cyclingSurface', 'cyclingElevationgain', 'cycleCoursetype', 'cycleCutoff',
+    'cyclingRoutemap', 'runningDistance', 'runningElevation', 'runningSurface', 'runningElevationgain',
+    'runningElevationloss', 'runningCoursetype', 'runCutoff', 'runRoutemap', 'organiserRating', 'triathlonType',
+    'standardTag', 'region', 'approvalStatus', 'difficultyLevel', 'month', 'primaryKey', 'latitude', 'longitude',
+    'country', 'editionYear', 'aidStations', 'restrictedTraffic', 'user_id', 'femaleParticpation', 'jellyFishRelated'
+]
+RUNNING_SCHEMA = [
+    'event', 'festivalName', 'imageURL', 'raceVideo', 'type', 'date', 'city', 'organiser', 'participationType',
+    'firstEdition', 'lastEdition', 'countEditions', 'mode', 'raceAccredition', 'theme', 'numberOfparticipants',
+    'startTime', 'scenic', 'registrationCost', 'ageLimitation', 'eventWebsite', 'organiserWebsite', 'bookingLink',
+    'newsCoverage', 'lastDate', 'participationCriteria', 'refundPolicy', 'runningDistance', 'runningElevation',
+    'runningSurface', 'runningElevationgain', 'runningElevationloss', 'runningCoursetype', 'runCutoff',
+    'runRoutemap', 'organiserRating', 'region', 'approvalStatus', 'difficultyLevel', 'month', 'primaryKey',
+    'latitude', 'longitude', 'country', 'editionYear', 'aidStations', 'restrictedTraffic', 'user_id'
+]
+SWIMMING_SCHEMA = [
+    'event', 'festivalName', 'imageURL', 'raceVideo', 'type', 'date', 'city', 'organiser', 'participationType',
+    'firstEdition', 'lastEdition', 'countEditions', 'mode', 'raceAccredition', 'theme', 'numberOfparticipants',
+    'startTime', 'scenic', 'registrationCost', 'ageLimitation', 'eventWebsite', 'organiserWebsite', 'bookingLink',
+    'newsCoverage', 'lastDate', 'participationCriteria', 'refundPolicy', 'swimDistance', 'swimType',
+    'swimmingLocation', 'waterTemperature', 'swimCoursetype', 'swimCutoff', 'swimRoutemap', 'organiserRating',
+    'standardTag', 'registrationOpentag', 'eventConcludedtag', 'state', 'region', 'approvalStatus', 'nextEdition',
+    'difficultyLevel', 'month', 'editionYear', 'aidStations', 'restrictedTraffic', 'user_id',
+    'femaleParticpation', 'jellyFishRelated', 'primaryKey', 'latitude', 'longitude', 'country'
+]
+
+# Crawling Rules
+BLACKLISTED_DOMAINS = [
+    "facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "pinterest.com",
+    "youtube.com", "tiktok.com", "indiamart.com", "allevents.in", "wikipedia.org", "about.com",
+    "worldsmarathons.com", "triathlon-database.com", "triathlon.org", "strava.com", "podcasts.apple.com",
+    "racingtheplanetstore.com", "aims-worldrunning.org/calendar"
+]
+NEWS_DOMAINS = ["news", "times", "express", "herald", "chronicle", "tribune"]
+RELEVANT_SUBPAGE_KEYWORDS = ["result", "participant", "detail", "info", "course", "race", "register", "schedule", "faq",
+                             "rules"]
+
+
+# ###################################################################################
+# --- AGENT LOGIC (Stabilized) ---
+# ###################################################################################
+class Logger(QObject):
+    log_signal = pyqtSignal(str)
+
+    def emit(self, message):
+        self.log_signal.emit(str(message))
+
+
+def retry(retries=MAX_RETRIES, delay=5, logger=None):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            for i in range(retries):
+                try:
+                    return f(*args, **kwargs)
+                except Exception as e:
+                    if i < retries - 1:
+                        is_rate_limit = "429" in str(e)
+                        current_delay = delay * (2 ** i) if not is_rate_limit else delay * (3 ** i)
+                        if logger: logger.emit(
+                            f"⚠️ Function '{f.__name__}' failed with {e}. Retrying in {current_delay:.2f}s...")
+                        time.sleep(current_delay)
+                    else:
+                        if logger: logger.emit(f"❌ Function '{f.__name__}' failed after {retries} retries.")
+                        return None
+
+        return wrapper
+
+    return decorator
+
+
+class MistralAnalystAgent:
+    def __init__(self, mistral_key_1: str, mistral_key_2: str, search_key: str, cse_id: str, schema: list,
+                 logger: Logger):
+        if not all([mistral_key_1, mistral_key_2, search_key, cse_id]):
+            raise ValueError("One or more API keys (Mistral, Google Search) are missing.")
+
+        self.logger = logger
+        self.llm_clients = [
+            ChatMistralAI(api_key=mistral_key_1, model=MISTRAL_MODEL, temperature=0.0),
+            ChatMistralAI(api_key=mistral_key_2, model=MISTRAL_MODEL, temperature=0.0)
+        ]
+        self.llm_client_index = 0
+        self.search_api_key = search_key
+        self.cse_id = cse_id
+        self.schema = schema
+        self.field_instructions = self._generate_field_instructions()
+        self.invalid_years = [str(y) for y in range(2015, 2025)]
+
+    def get_caching_key(self, event_name: str) -> str:
+        base_name = re.sub(r'sprint|standard|olympic|full iron|half iron|70\.3', '', event_name, flags=re.IGNORECASE)
+        return re.sub(r'[^a-z0-9]+', '-', base_name.lower()).strip('-')
+
+    def _generate_field_instructions(self) -> dict:
+        instructions = {}
+        for key in self.schema:
+            if key in DEFAULT_BLANK_FIELDS: continue
+            if key in CHOICE_OPTIONS:
+                instructions[
+                    key] = f"Extract the data for '{key}'. MUST be one of the following options: {', '.join(CHOICE_OPTIONS[key])}."
+            else:
+                instructions[key] = f"Extract the data for '{key}'."
+        return instructions
+
+    @retry(retries=MAX_RETRIES, delay=5)
+    def _call_llm(self, prompt: str) -> str:
+        client = self.llm_clients[self.llm_client_index]
+        self.llm_client_index = (self.llm_client_index + 1) % len(self.llm_clients)
+        if DEBUG: self.logger.emit(f"    - 🤖 Using Mistral API Key #{self.llm_client_index}")
+        messages = [HumanMessage(content=prompt)]
+        response = client.invoke(messages)
+        return response.content
+
+    def _google_search(self, query: str, num_results=10) -> list:
+        self.logger.emit(f"  - Sending raw query to Google: '{query}'")
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {"key": self.search_api_key, "cx": self.cse_id, "q": query, "num": num_results}
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        results = response.json()
+        return [{"title": item.get("title"), "link": item.get("link"), "snippet": item.get("snippet")} for item in
+                results.get("items", [])]
+
+    def _step_1a_initial_search(self, race_info: dict) -> list:
+        event_name = race_info.get("Festival")
+        self.logger.emit(f"\n[STEP 1A] Searching for '{event_name}' with Raw Google Search")
+        self.logger.emit("*" * 60)
+        query = f'{event_name} 2025 OR 2026'
+        try:
+            search_results = self._google_search(query, num_results=MAX_SEARCH_RESULTS)
+            if not search_results:
+                self.logger.emit("  - ❌ Google Search returned no results.")
+                return []
+        except requests.HTTPError as e:
+            self.logger.emit(f"  - ❌ Google Search API call failed: {e}")
+            return []
+
+        clean_search_results = [r for r in search_results if r.get('link') and not any(
+            domain in r['link'] for domain in BLACKLISTED_DOMAINS) and self._is_valid_url(r['link'])]
+        self.logger.emit(f"✅ Pre-filtering complete. {len(clean_search_results)} results remain for LLM validation.")
+        return clean_search_results
+
+    def _step_1b_validate_and_select_urls(self, event_name: str, search_results: list, top_n: int) -> list:
+        self.logger.emit(f"\n[STEP 1B] Validating search results with LLM Analyst")
+        self.logger.emit("*" * 60)
+        prompt_lines = [
+            "You are an intelligence analyst. Your task is to identify the most relevant websites for a given event from a list of Google search results.",
+            "Analyze the title, link, and snippet for each result.",
+            "Select the single best 'primary_url' (the official event page) and up to three 'secondary_urls' (news, registration portals, etc.).",
+            f"\nEvent to find: '{event_name}'",
+            f"\nSearch Results:\n```json\n{json.dumps(search_results, indent=2)}\n```",
+            "\nYour response MUST be a single valid JSON object with two keys: 'primary_url' (a single string) and 'secondary_urls' (a list of strings).",
+        ]
+        validation_prompt = "\n".join(prompt_lines)
+        response_text = self._call_llm(validation_prompt)
+        try:
+            match = re.search(r'\{.*?\}', response_text, re.DOTALL)
+            if match:
+                validated_urls = json.loads(match.group(0))
+                primary = validated_urls.get("primary_url")
+                secondaries = validated_urls.get("secondary_urls", [])
+                final_urls = [primary] + secondaries if primary else secondaries
+                final_urls = list(dict.fromkeys([url for url in final_urls if url]))
+                self.logger.emit(f"✅ LLM Analyst selected {len(final_urls)} relevant URLs.")
+                return final_urls[:top_n]
+        except (json.JSONDecodeError, AttributeError, TypeError) as e:
+            self.logger.emit(f"  - ⚠️ LLM validation failed: {e}. Falling back to programmatic selection.")
+        return [r['link'] for r in search_results[:top_n] if r.get('link')]
+
+    @retry(retries=2, delay=10)
+    def _crawl_url_with_jina(self, url: str) -> str | None:
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = os.path.join(CRAWL_CACHE_DIR, f"{url_hash}.md")
+        if os.path.exists(cache_path):
+            self.logger.emit(f"  - 🧠 Found crawl cache for: {url}")
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        self.logger.emit(f"  - 🕸️  Crawling: {url}")
+        try:
+            response = requests.get(f"https://r.jina.ai/{url}", timeout=180)
+            response.raise_for_status()
+            content = response.text
+            self.logger.emit(f"  - ✅ Successfully received {len(content)} characters from Jina for {url}")
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return content
+        except requests.RequestException as e:
+            self.logger.emit(f"  - ❌ Failed to crawl {url}: {e}")
+            return None
+
+    def _local_preprocess_markdown(self, markdown: str) -> str:
+        text = markdown
+        patterns = {
+            "social_links": r'\[[^\]]*?\]\((https?:\/\/[^\/]*?(facebook\.com|instagram\.com|twitter\.com|x\.com|linkedin\.com|youtube\.com)[^\)]*?)\)',
+            "junk_links": r'\[\s*(shop|help|sign in|faqs|pro series)\s*\]\([^)]+\)', "images": r'!\[.*?\]\(.*?\)',
+            "separators": r'={3,}',
+        }
+        for _, pattern in patterns.items():
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+        lines = [line for line in text.split('\n') if not re.search(r'about us|privacy policy', line, re.IGNORECASE)]
+        text = re.sub(r'\s{2,}', " ", "\n".join(lines)).strip()
+        return text
+
+    def _is_valid_url(self, url: str) -> bool:
+        if any(year in url for year in self.invalid_years):
+            if DEBUG: self.logger.emit(f"  - Filtering out past year URL: {url}")
+            return False
+        return True
+
+    def _update_knowledge_base(self, variant_memory: dict, new_text: str, event_name: str, variant_name: str,
+                               is_primary_source: bool) -> dict:
+        self.logger.emit(f"    - 🧠 Updating knowledge for '{variant_name}'...")
+        source_priority_instruction = "This text is from the PRIMARY official source. Trust it highly." if is_primary_source else "This text is from a SECONDARY source. Use it to fill gaps, but be cautious."
+        prompt_lines = [
+            "You are a meticulous data analyst. Your primary goal is accuracy.",
+            source_priority_instruction,
+            "Update the `CURRENT_KNOWLEDGE` JSON with new info from the `NEW_TEXT_CHUNK`.",
+            "Your response must be ONLY the complete, updated JSON object.",
+            f"Event: '{event_name}'", f"Race Variant to Focus On: '{variant_name}'",
+            f"CURRENT_KNOWLEDGE:\n```json\n{json.dumps(variant_memory, indent=2)}\n```",
+            f"Data Schema with Instructions:\n```json\n{json.dumps(self.field_instructions, indent=2)}\n```",
+            f"NEW_TEXT_CHUNK:\n{new_text}"
+        ]
+        update_prompt = "\n".join(prompt_lines)
+        response_text = self._call_llm(update_prompt)
+        if not response_text:
+            self.logger.emit("    - ⚠️ LLM call failed after retries. Skipping this knowledge update.")
+            return variant_memory
+        try:
+            match = re.search(r'\{.*?\}', response_text, re.DOTALL)
+            if match: return json.loads(match.group(0))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return variant_memory
+
+    def _discover_and_update_variants(self, knowledge_base: dict, text: str, event_name: str):
+        self.logger.emit("    - 🔍 Scanning text for new race variants...")
+        variant_prompt = f"From the provided text about '{event_name}', identify all distinct race variants (e.g., 'Olympic Distance', 'Sprint Relay'). Return ONLY a valid JSON list of strings.\n\nText:\n{text[:4000]}"
+        response_text = self._call_llm(variant_prompt)
+        try:
+            match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+            if match:
+                discovered_variants = json.loads(match.group(0))
+                for variant in discovered_variants:
+                    if variant not in knowledge_base:
+                        self.logger.emit(f"    - ✨ New variant discovered and added to knowledge base: '{variant}'")
+                        knowledge_base[variant] = {}
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            if event_name not in knowledge_base:
+                knowledge_base[event_name] = {}
+
+    def run(self, race_info: dict) -> dict:
+        event_name = race_info.get("Festival")
+        search_results = self._step_1a_initial_search(race_info)
+        if not search_results: return None
+        validated_urls = self._step_1b_validate_and_select_urls(event_name, search_results, TOP_N_URLS_TO_PROCESS)
+        if not validated_urls: return None
+        return self._crawl_and_extract(validated_urls, event_name)
+
+    def _crawl_and_extract(self, urls: list, event_name: str) -> dict:
+        self.logger.emit("\n[STEP 2] Tiered Deep Crawl & Intelligent Extraction")
+        self.logger.emit("*" * 60)
+        knowledge_base = {event_name: {}}
+
+        for i, base_url in enumerate(urls):
+            self.logger.emit(f"\nProcessing URL #{i + 1}: {base_url}")
+            is_primary = (i == 0)
+            main_markdown = self._crawl_url_with_jina(base_url)
+            if not main_markdown: continue
+
+            clean_main_text = self._local_preprocess_markdown(main_markdown)
+            self._discover_and_update_variants(knowledge_base, clean_main_text, event_name)
+
+            for variant in list(knowledge_base.keys()):
+                knowledge_base[variant] = self._update_knowledge_base(knowledge_base[variant], clean_main_text,
+                                                                      event_name, variant, is_primary_source=is_primary)
+
+            link_pattern = re.compile(r'\[.*?\]\((.*?)\)')
+            found_links, subpage_urls = link_pattern.findall(main_markdown), set()
+            base_netloc = urlparse(base_url).netloc
+            url_friendly_event_name = re.sub(r'\s+', '-', event_name.lower())
+
+            for href in found_links:
+                full_url = urljoin(base_url, href)
+                if self._is_valid_url(full_url) and urlparse(full_url).netloc == base_netloc and any(
+                        keyword in full_url.lower() for keyword in
+                        RELEVANT_SUBPAGE_KEYWORDS) and url_friendly_event_name in full_url.lower():
+                    subpage_urls.add(full_url)
+
+            if subpage_urls:
+                self.logger.emit(f"  - Found {len(subpage_urls)} relevant subpages to crawl sequentially.")
+                for sub_url in list(subpage_urls)[:MAX_SUBPAGES_PER_SITE]:
+                    subpage_markdown = self._crawl_url_with_jina(sub_url)
+                    if subpage_markdown:
+                        clean_subpage_text = self._local_preprocess_markdown(subpage_markdown)
+                        self._discover_and_update_variants(knowledge_base, clean_subpage_text, event_name)
+                        for variant in list(knowledge_base.keys()):
+                            knowledge_base[variant] = self._update_knowledge_base(knowledge_base[variant],
+                                                                                  clean_subpage_text, event_name,
+                                                                                  variant, is_primary_source=is_primary)
+
+        self.logger.emit("\n✅ All URLs and subpages processed.")
+        return knowledge_base
+
+
+# ###################################################################################
+# --- MAIN LOGIC & FORMATTING ---
+# ###################################################################################
+
+def format_final_row(festival_name_input: str, variant_name: str, data: dict, schema: list,
+                     logger: Logger) -> dict | None:
+    def finalize_value(value: any) -> str:
+        if value is None: return ""
+        text = ftfy.fix_text(str(value)).strip()
+        if text.lower() in ["na", "n/a", "", "none", "not specified"]: return ""
+        return text
+
+    date_str = finalize_value(data.get("date", ""))
+    if date_str:
+        try:
+            event_date = date_parse(date_str, fuzzy=True, dayfirst=True)
+            if event_date.year < 2025:
+                logger.emit(
+                    f"    - ⚠️ Filtering out past event: {festival_name_input} - {variant_name} dated {event_date.year}")
+                return None
+        except (ValueError, TypeError):
+            pass
+
+    row = {}
+    for key in schema:
+        if key in DEFAULT_BLANK_FIELDS:
+            row[key] = ""
+            continue
+        raw_value = data.get(key, "")
+        if key == "startTime":
+            val_str = finalize_value(raw_value)
+            if not val_str:
+                row[key] = ""
+            else:
+                try:
+                    row[key] = date_parse(val_str, fuzzy=True).strftime("%I:%M %p")
+                except (ValueError, TypeError):
+                    row[key] = ""
+        elif key in ["date", "lastDate"]:
+            val_str = finalize_value(raw_value)
+            if not val_str:
+                row[key] = ""
+            else:
+                try:
+                    row[key] = date_parse(val_str, fuzzy=True).strftime("%d/%m/%Y")
+                except (ValueError, TypeError):
+                    row[key] = ""
+        elif key == "ageLimitation":
+            val_str = finalize_value(raw_value)
+            match = re.search(r'(\d+)\+?', val_str)
+            row[key] = f"{match.group(1)}+" if match else ""
+        elif key == "registrationCost":
+            val_str = finalize_value(raw_value)
+            if not val_str:
+                row[key] = ""
+            elif val_str.lower() == "free":
+                row[key] = "0"
+            else:
+                match = re.search(r'(\d[\d,.]*)', val_str)
+                row[key] = match.group(1).replace(',', '').split('.')[0] if match else ""
+        elif "Distance" in key or "gain" in key or "loss" in key or "Edition" in key or "editionYear" in key:
+            val_str = finalize_value(raw_value)
+            match = re.search(r'(\d+\.?\d*)', val_str)
+            row[key] = match.group(1) if match else ""
+        else:
+            row[key] = finalize_value(raw_value)
+
+    row["festivalName"] = row.get("festivalName") or festival_name_input
+    row["event"] = f"{row['festivalName']} - {variant_name}" if str(row.get('festivalName', '')).lower() not in str(
+        variant_name or '').lower() else variant_name
+
+    if row.get("date"):
+        try:
+            dt = date_parse(row["date"], dayfirst=True)
+            row["month"] = dt.strftime("%B")
+            year_str = str(dt.year)
+            row["editionYear"] = year_str
+            row["lastEdition"] = year_str
+            first_ed_str = row.get("firstEdition", "")
+            if first_ed_str and first_ed_str.isdigit():
+                count = int(year_str) - int(first_ed_str) + 1
+                row["countEditions"] = str(count) if count > 0 else "1"
+            else:
+                row["countEditions"] = "1"
+        except (ValueError, TypeError):
+            pass
+    return row
+
+
+def process_races(input_file_path, output_dir_path, env_path, logger: Logger):
+    global MISTRAL_API_KEY, MISTRAL_API_KEY_1, SEARCH_API_KEY, CSE_ID
+    global OUTPUT_DIR, CRAWL_CACHE_DIR, KNOWLEDGE_CACHE_DIR
+
+    logger.emit("=" * 60)
+    logger.emit(f"🚀 LAUNCHING Crawl4AI {APP_VERSION}: Mistral Analyst Agent")
+    logger.emit("=" * 60)
+
+    OUTPUT_DIR = output_dir_path
+    base_dir = os.path.dirname(output_dir_path)
+    CRAWL_CACHE_DIR = os.path.join(base_dir, "crawl_cache")
+    KNOWLEDGE_CACHE_DIR = os.path.join(base_dir, "knowledge_cache")
+
+    if not load_dotenv(dotenv_path=env_path):
+        logger.emit(f"❌ CONFIGURATION ERROR: Could not find or load .env file at '{env_path}'.")
+        return
+
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+    MISTRAL_API_KEY_1 = os.getenv("MISTRAL_API_KEY_1")
+    SEARCH_API_KEY = os.getenv("SEARCH_API_KEY")
+    CSE_ID = os.getenv("CSE_ID")
+
+    if not all([MISTRAL_API_KEY, MISTRAL_API_KEY_1, SEARCH_API_KEY, CSE_ID]):
+        logger.emit("❌ CONFIGURATION ERROR: One or more required API keys are missing in the .env file.")
+        logger.emit("    (Required: MISTRAL_API_KEY, MISTRAL_API_KEY_1, SEARCH_API_KEY, CSE_ID)")
+        return
+
+    try:
+        logger.emit("\n🔄 Converting input file to JSON...")
+        if input_file_path.endswith('.csv'):
+            df = pd.read_csv(input_file_path, encoding='latin1')
+        else:
+            df = pd.read_excel(input_file_path)
+
+        required_cols = ['S.no', 'Festival', 'Type', 'Priority']
+        if not all(col in df.columns for col in required_cols):
+            raise KeyError(f"Input file must contain the following columns: {required_cols}")
+
+        # --- ROBUSTNESS FIX #1: Handle empty 'Priority' values before they cause errors ---
+        df['Priority'] = pd.to_numeric(df['Priority'], errors='coerce').fillna(99)
+
+        df_selected = df[required_cols]
+        json_data = df_selected.to_json(orient='records')
+        races = json.loads(json_data)
+
+        # Now sorting is safe because 'Priority' will always be a number
+        races.sort(key=lambda x: x.get('Priority', 99))
+
+        logger.emit(f"✅ Found and converted {len(races)} events to process from '{os.path.basename(input_file_path)}'.")
+    except Exception as e:
+        logger.emit(f"❌ FILE ERROR: Could not read or parse '{os.path.basename(input_file_path)}'. Error: {e}")
+        return
+
+    for dir_path in [OUTPUT_DIR, CRAWL_CACHE_DIR, KNOWLEDGE_CACHE_DIR]:
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            logger.emit(f"📂 Created directory: {dir_path}")
+
+    grouped_races, failed_missions = {}, []
+    for race in races:
+        # --- ROBUSTNESS FIX #2: Ensure 'Type' is a valid string before calling .lower() ---
+        race_type_val = race.get("Type")
+        if isinstance(race_type_val, str) and race_type_val.strip():
+            race_type = race_type_val.lower().strip()
+        else:
+            race_type = "unknown"  # Default for None, NaN, empty strings, etc.
+
+        if race_type not in grouped_races: grouped_races[race_type] = []
+        grouped_races[race_type].append(race)
+
+    csv_writers, output_files = {}, {}
+    try:
+        for race_type, race_list in grouped_races.items():
+            if race_type == "triathlon":
+                schema = TRIATHLON_SCHEMA
+            elif race_type in ["running", "trail running"]:
+                schema = RUNNING_SCHEMA
+            elif race_type == "swimming":
+                schema = SWIMMING_SCHEMA
+            else:
+                logger.emit(f"⚠️ Skipping unknown race type '{race_type}'.")
+                continue
+
+            agent = MistralAnalystAgent(
+                mistral_key_1=MISTRAL_API_KEY, mistral_key_2=MISTRAL_API_KEY_1,
+                search_key=SEARCH_API_KEY, cse_id=CSE_ID, schema=schema, logger=logger
+            )
+
+            output_filename = f"{datetime.now():%Y-%m-%d}_{APP_VERSION}_{race_type}.csv"
+            output_filepath = os.path.join(OUTPUT_DIR, output_filename)
+            logger.emit(
+                f"\n💾 Processing {len(race_list)} '{race_type}' events. Output will be saved to: {output_filepath}")
+
+            output_files[race_type] = open(output_filepath, 'w', newline='', encoding='utf-8')
+            writer = csv.DictWriter(output_files[race_type], fieldnames=schema)
+            writer.writeheader()
+            csv_writers[race_type] = writer
+
+            for i, race_info in enumerate(race_list):
+                event_name = race_info.get("Festival")
+                if not event_name:
+                    logger.emit(f"⚠️ Skipping item #{i + 1} as it has no 'Festival' name.")
+                    continue
+
+                logger.emit("\n" + "=" * 60)
+                logger.emit(f"🏁 STARTING MISSION FOR '{race_type}': {event_name}")
+                logger.emit("=" * 60)
+
+                caching_key = agent.get_caching_key(event_name)
+                cache_file_path = os.path.join(KNOWLEDGE_CACHE_DIR, f"{caching_key}.json")
+                knowledge_base = None
+
+                if os.path.exists(cache_file_path):
+                    logger.emit(f"🧠 Found knowledge cache for '{caching_key}'. Loading data.")
+                    with open(cache_file_path, 'r', encoding='utf-8') as cache_file:
+                        knowledge_base = json.load(cache_file)
+                else:
+                    knowledge_base = agent.run(race_info)
+
+                if knowledge_base:
+                    for variant_name, data in knowledge_base.items():
+                        row = format_final_row(event_name, variant_name, data, schema, logger)
+                        if row: csv_writers[race_type].writerow(row)
+
+                    csv_writers[race_type].writerow({})
+                    with open(cache_file_path, 'w', encoding='utf-8') as cache_file:
+                        json.dump(knowledge_base, cache_file, indent=4)
+                    logger.emit(f"✅ MISSION COMPLETE FOR: {event_name}")
+                else:
+                    logger.emit(f"❌ MISSION FAILED FOR: {event_name}. No data could be built.")
+                    failed_missions.append(event_name)
+    finally:
+        for f in output_files.values():
+            f.close()
+        logger.emit("\n✅ All output files have been closed.")
+
+    logger.emit("\n" + "=" * 60)
+    logger.emit("🎉 ALL MISSIONS COMPLETE")
+    if failed_missions:
+        logger.emit("\n📋 Summary of Failed Missions:")
+        for event in failed_missions: logger.emit(f"  - {event}")
+    else:
+        logger.emit("\n✅ All missions completed successfully.")
+    logger.emit("=" * 60)
+
+
+# ###################################################################################
+# --- UI IMPLEMENTATION (PyQt5) ---
+# ###################################################################################
+
+class Worker(QThread):
+    def __init__(self, input_path, output_path, env_path, logger):
+        super().__init__()
+        self.input_path = input_path
+        self.output_path = output_path
+        self.env_path = env_path
+        self.logger = logger
+
+    def run(self):
+        try:
+            process_races(self.input_path, self.output_path, self.env_path, self.logger)
+        except Exception as e:
+            self.logger.emit(f"\n\nFATAL ERROR in processing thread: {e}")
+            self.logger.emit("The application may need to be restarted.")
+
+
+class AppUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f'Crawl4AI Analyst Agent {APP_VERSION}')
+        self.setGeometry(100, 100, 800, 600)
+        self.worker = None
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        input_group = QGroupBox("1. Select Inputs")
+        input_layout = QVBoxLayout()
+        self.env_path_edit = self.create_path_selector(".env File Path:", self.select_env_file)
+        input_layout.addLayout(self.env_path_edit)
+        self.input_path_edit = self.create_path_selector("Input File (CSV/XLSX):", self.select_input_file)
+        input_layout.addLayout(self.input_path_edit)
+        self.output_path_edit = self.create_path_selector("Output Directory:", self.select_output_dir)
+        input_layout.addLayout(self.output_path_edit)
+        input_group.setLayout(input_layout)
+        layout.addWidget(input_group)
+
+        control_group = QGroupBox("2. Run Analysis")
+        control_layout = QVBoxLayout()
+        self.run_button = QPushButton("Start Processing")
+        self.run_button.clicked.connect(self.run_processing)
+        self.run_button.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; padding: 10px; font-size: 16px; }")
+        control_layout.addWidget(self.run_button)
+        control_group.setLayout(control_layout)
+        layout.addWidget(control_group)
+
+        log_group = QGroupBox("Live Log")
+        log_layout = QVBoxLayout()
+        self.log_area = QTextEdit()
+        self.log_area.setReadOnly(True)
+        log_layout.addWidget(self.log_area)
+        log_group.setLayout(log_layout)
+        layout.addWidget(log_group)
+
+        self.logger = Logger()
+        self.logger.log_signal.connect(self.update_log)
+
+    def create_path_selector(self, label_text, connect_method):
+        layout = QHBoxLayout()
+        label = QLabel(label_text)
+        path_edit = QLineEdit()
+        button = QPushButton("Browse...")
+        button.clicked.connect(lambda: connect_method(path_edit))
+        layout.addWidget(label)
+        layout.addWidget(path_edit)
+        layout.addWidget(button)
+        return layout
+
+    def select_env_file(self, path_edit):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Select .env File', '', 'All Files (*)')
+        if fname: path_edit.setText(fname)
+
+    def select_input_file(self, path_edit):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Select Input File', '', 'Excel Files (*.xlsx);;CSV Files (*.csv)')
+        if fname: path_edit.setText(fname)
+
+    def select_output_dir(self, path_edit):
+        dname = QFileDialog.getExistingDirectory(self, 'Select Output Directory')
+        if dname: path_edit.setText(dname)
+
+    def update_log(self, message):
+        self.log_area.append(message)
+        self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
+        QApplication.processEvents()
+
+    def run_processing(self):
+        env_path = self.env_path_edit.itemAt(1).widget().text()
+        input_path = self.input_path_edit.itemAt(1).widget().text()
+        output_path = self.output_path_edit.itemAt(1).widget().text()
+
+        if not all([env_path, input_path, output_path]):
+            self.update_log("❌ ERROR: Please specify all paths before starting.")
+            return
+
+        self.run_button.setEnabled(False)
+        self.run_button.setText("Processing... Please Wait")
+        self.log_area.clear()
+
+        self.worker = Worker(input_path, output_path, env_path, self.logger)
+        self.worker.finished.connect(self.on_processing_finished)
+        self.worker.start()
+
+    def on_processing_finished(self):
+        self.update_log("\n--- Processing thread has finished. ---")
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Start Processing")
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ui = AppUI()
+    ui.show()
+    sys.exit(app.exec_())
