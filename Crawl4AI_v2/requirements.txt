@@ -1,0 +1,48 @@
+# --- UI Framework ---
+PyQt5==5.15.10
+pandas
+
+# --- Core ML & Vector DB ---
+numpy==1.26.4
+torch==2.3.1
+faiss-cpu==1.8.0
+sentence-transformers==2.7.0
+spacy==3.7.4
+onnxruntime==1.17.1
+
+# --- LLM Integrations (Mistral & Google) ---
+langchain-mistralai>=0.1.6
+langchain-core==0.1.52
+langchain-text-splitters==0.0.1
+google-generativeai
+
+# --- Vector DB and Indexing ---
+chromadb==0.5.0
+tiktoken==0.7.0 # Dependency for ChromaDB
+rank-bm25==0.2.2
+tinydb==4.8.0
+
+# --- Web Crawling, Parsing & Preprocessing ---
+requests==2.31.0
+lxml==5.2.2
+markdown-it-py==3.0.0
+readability-lxml==0.8.1
+lxml_html_clean==0.1.1
+
+# --- Utilities ---
+python-dotenv==1.0.1
+python-dateutil==2.9.0.post0
+Pillow==10.3.0
+ftfy==6.2.0
+dirtyjson==1.0.8
+
+# --- Optional: For building an executable ---
+auto-py-to-exe==2.40.0
+
+# --- Hugging Face Transformers ---
+transformers[torch]==4.41.2
+
+
+# IMPORTANT: After installing the packages above with pip,
+# you must also download the Spacy model. Run this command:
+# python -m spacy download en_core_web_sm
